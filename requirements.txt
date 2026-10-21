@@ -5,7 +5,6 @@ numpy==1.26.4
 streamlit==1.41.1
 opencv-python-headless==4.10.0.84
 mtcnn==0.1.1
-keras-vggface==0.6
 keras-applications==1.0.8
 scikit-learn==1.7.2
 protobuf==4.25.9

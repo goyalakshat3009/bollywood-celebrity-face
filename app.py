@@ -14,6 +14,8 @@ from keras_vggface.vggface import VGGFace
 from sklearn.metrics.pairwise import cosine_similarity
 
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # -------------------- PAGE CONFIG --------------------
 st.set_page_config(
     page_title="Bollywood Celebrity Recognition",
