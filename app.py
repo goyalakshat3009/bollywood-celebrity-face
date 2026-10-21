@@ -1,3 +1,41 @@
+
+# Fix old keras-vggface imports for Keras 2.15
+import importlib.util
+from pathlib import Path
+
+spec = importlib.util.find_spec("keras_vggface")
+
+if spec and spec.submodule_search_locations:
+    package_dir = Path(next(iter(spec.submodule_search_locations)))
+
+    replacements = {
+        "models.py": [
+            ("from keras.utils import layer_utils",
+             "from keras.src.utils import layer_utils"),
+            ("from keras.utils.data_utils import get_file",
+             "from keras.utils import get_file"),
+            ("from keras.engine.topology import get_source_inputs",
+             "from keras.utils import get_source_inputs"),
+        ],
+        "utils.py": [
+            ("from keras.utils.data_utils import get_file",
+             "from keras.utils import get_file"),
+        ],
+    }
+
+    for filename, fixes in replacements.items():
+        file_path = package_dir / filename
+
+        if file_path.exists():
+            source = file_path.read_text(encoding="utf-8")
+
+            for old, new in fixes:
+                source = source.replace(old, new)
+
+            file_path.write_text(source, encoding="utf-8")
+
+
+# Imports
 from keras_vggface.utils import preprocess_input
 from keras_vggface.vggface import VGGFace
 from sklearn.metrics.pairwise import cosine_similarity
