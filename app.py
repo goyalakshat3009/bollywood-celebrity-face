@@ -1,9 +1,8 @@
 
 import os
 import pickle
-import uuid
+from pathlib import PureWindowsPath
 
-import cv2
 import numpy as np
 import streamlit as st
 
@@ -14,7 +13,13 @@ from keras_vggface.vggface import VGGFace
 from sklearn.metrics.pairwise import cosine_similarity
 
 
+# -------------------- BASE DIRECTORY --------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATASET_DIR = os.path.join(BASE_DIR, "data")
+
+EMBEDDINGS_PATH = os.path.join(BASE_DIR, "embedding.pkl")
+FILENAMES_PATH = os.path.join(BASE_DIR, "filenames.pkl")
+
 
 # -------------------- PAGE CONFIG --------------------
 st.set_page_config(
@@ -27,13 +32,6 @@ st.title("🎬 Which Bollywood Celebrity Are You?")
 st.write(
     "Upload your photo to find your closest Bollywood celebrity match!"
 )
-
-
-# -------------------- FILE PATHS --------------------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-EMBEDDINGS_PATH = os.path.join(BASE_DIR, "embedding.pkl")
-FILENAMES_PATH = os.path.join(BASE_DIR, "filenames.pkl")
 
 
 # -------------------- LOAD MODEL --------------------
@@ -54,6 +52,16 @@ def load_model():
 # -------------------- LOAD DATA --------------------
 @st.cache_data
 def load_data():
+    if not os.path.isfile(EMBEDDINGS_PATH):
+        raise FileNotFoundError(
+            f"Embedding file not found: {EMBEDDINGS_PATH}"
+        )
+
+    if not os.path.isfile(FILENAMES_PATH):
+        raise FileNotFoundError(
+            f"Filenames file not found: {FILENAMES_PATH}"
+        )
+
     with open(EMBEDDINGS_PATH, "rb") as f:
         feature_list = pickle.load(f)
 
@@ -81,31 +89,86 @@ def load_data():
     return feature_list, filenames
 
 
-# -------------------- INITIALIZE --------------------
-try:
-    if not os.path.exists(EMBEDDINGS_PATH):
-        st.error("embedding.pkl was not found in the repository.")
-        st.stop()
+# -------------------- RESOLVE DATASET IMAGE PATH --------------------
+def resolve_dataset_path(image_path):
+    """
+    Resolve image paths saved on Windows or Linux.
 
-    if not os.path.exists(FILENAMES_PATH):
-        st.error("filenames.pkl was not found in the repository.")
-        st.stop()
+    Supports paths such as:
+    data/Ranbir_Kapoor/Ranbir_Kapoor.130.jpg
 
-    with st.spinner("Loading face recognition model..."):
-        detector, model = load_model()
-        feature_list, filenames = load_data()
+    C:/project/data/Ranbir_Kapoor/Ranbir_Kapoor.130.jpg
 
-except Exception as e:
-    st.error("Could not initialize the recognition system.")
-    st.exception(e)
-    st.stop()
+    data\\Ranbir_Kapoor\\Ranbir_Kapoor.130.jpg
+    """
+
+    raw_path = str(image_path).strip()
+
+    # Interpret the saved path using Windows path rules,
+    # regardless of the operating system running this app.
+    windows_path = PureWindowsPath(raw_path)
+
+    image_name = windows_path.name
+    actor_folder = windows_path.parent.name
+
+    # First try the expected project dataset structure.
+    candidate = os.path.join(
+        DATASET_DIR,
+        actor_folder,
+        image_name
+    )
+
+    if os.path.isfile(candidate):
+        return candidate
+
+    # Try the saved path as a native path.
+    if os.path.isfile(raw_path):
+        return raw_path
+
+    # Try a path relative to the project directory.
+    normalized_relative = raw_path.replace("\\", "/")
+    relative_candidate = os.path.join(
+        BASE_DIR,
+        *normalized_relative.split("/")
+    )
+
+    if os.path.isfile(relative_candidate):
+        return relative_candidate
+
+    # Try a path relative to the data directory.
+    data_candidate = os.path.join(
+        DATASET_DIR,
+        *normalized_relative.split("/")[-2:]
+    )
+
+    if os.path.isfile(data_candidate):
+        return data_candidate
+
+    raise FileNotFoundError(
+        "Matched dataset image was not found.\n"
+        f"Actor folder: {actor_folder}\n"
+        f"Image name: {image_name}\n"
+        f"Expected location: {candidate}"
+    )
+
+
+# -------------------- CELEBRITY NAME --------------------
+def get_celebrity_name(image_path):
+    """
+    Get celebrity name from the dataset's actor folder.
+    """
+    resolved_path = os.path.normpath(str(image_path))
+    parent_folder = os.path.basename(
+        os.path.dirname(resolved_path)
+    )
+
+    return parent_folder.replace("_", " ")
 
 
 # -------------------- FACE FEATURE EXTRACTION --------------------
-def extract_features(pil_image):
+def extract_features(pil_image, detector, model):
     """
-    Detect the largest face and generate a VGGFace ResNet50
-    feature vector using the same preprocessing as the dataset.
+    Detect the largest face and extract VGGFace ResNet50 features.
     """
 
     img_rgb = np.asarray(pil_image.convert("RGB"))
@@ -122,7 +185,8 @@ def extract_features(pil_image):
     face_info = max(
         results,
         key=lambda item: (
-            max(0, item["box"][2]) * max(0, item["box"][3])
+            max(0, item["box"][2]) *
+            max(0, item["box"][3])
         )
     )
 
@@ -143,31 +207,40 @@ def extract_features(pil_image):
             "Could not crop the detected face. Try another photo."
         )
 
-    # Resize and prepare the image.
+    # Resize face to VGGFace input dimensions.
     face_image = Image.fromarray(face).resize((224, 224))
-    face_array = np.asarray(face_image, dtype=np.float32)
-    face_array = np.expand_dims(face_array, axis=0)
 
+    face_array = np.asarray(
+        face_image,
+        dtype=np.float32
+    )
+
+    face_array = np.expand_dims(face_array, axis=0)
     face_array = preprocess_input(face_array)
 
-    features = model.predict(face_array, verbose=0).flatten()
+    features = model.predict(
+        face_array,
+        verbose=0
+    ).flatten()
 
     if not np.isfinite(features).all():
-        raise ValueError("Feature extraction returned invalid values.")
+        raise ValueError(
+            "Feature extraction returned invalid values."
+        )
 
     return features
 
 
 # -------------------- CELEBRITY MATCHING --------------------
-def recommend(features):
+def recommend(features, feature_list):
     """
-    Find the closest embedding using cosine similarity.
+    Find the closest saved embedding using cosine similarity.
     """
 
     if features.shape[0] != feature_list.shape[1]:
         raise ValueError(
             "Feature dimensions do not match the saved embeddings. "
-            "Regenerate embeddings with the same VGGFace model."
+            "Regenerate embeddings using the same VGGFace model."
         )
 
     similarities = cosine_similarity(
@@ -178,33 +251,33 @@ def recommend(features):
     best_index = int(np.argmax(similarities))
     best_score = float(similarities[best_index])
 
-    # Also return the top 3 matches, or fewer if the dataset is small.
-    top_indices = np.argsort(similarities)[::-1][:min(3, len(similarities))]
+    top_indices = np.argsort(similarities)[::-1][
+        :min(3, len(similarities))
+    ]
 
     return best_index, best_score, top_indices, similarities
 
 
-# -------------------- CELEBRITY NAME --------------------
-def get_celebrity_name(image_path):
-    """
-    Expected structure:
-    data/Actor_Name/image.jpg
-    """
+# -------------------- INITIALIZE APP --------------------
+try:
+    with st.spinner("Loading face recognition model..."):
+        detector, model = load_model()
+        feature_list, filenames = load_data()
 
-    normalized_path = os.path.normpath(str(image_path))
-    parent_folder = os.path.basename(
-        os.path.dirname(normalized_path)
-    )
-
-    return parent_folder.replace("_", " ")
+except Exception as e:
+    st.error("Could not initialize the recognition system.")
+    st.exception(e)
+    st.stop()
 
 
-# -------------------- USER INTERFACE --------------------
+# -------------------- FILE UPLOADER --------------------
 uploaded_image = st.file_uploader(
     "Choose your photo",
     type=["jpg", "jpeg", "png"]
 )
 
+
+# -------------------- RECOGNITION --------------------
 if uploaded_image is not None:
 
     try:
@@ -222,28 +295,31 @@ if uploaded_image is not None:
         with st.spinner(
             "Detecting face and finding your closest celebrity match..."
         ):
-            features = extract_features(display_image)
-
-            best_index, best_score, top_indices, similarities = (
-                recommend(features)
+            features = extract_features(
+                display_image,
+                detector,
+                model
             )
 
-            matched_path = str(filenames[best_index])
+            (
+                best_index,
+                best_score,
+                top_indices,
+                similarities
+            ) = recommend(features, feature_list)
 
-            # Support absolute paths and paths relative to the project.
-            if not os.path.isabs(matched_path):
-                matched_path = os.path.join(BASE_DIR, matched_path)
+            # Resolve Windows/Linux paths saved in filenames.pkl.
+            matched_path = resolve_dataset_path(
+                filenames[best_index]
+            )
 
-            if not os.path.isfile(matched_path):
-                raise FileNotFoundError(
-                    "The matched dataset image was not found: "
-                    + matched_path
-                )
-
-            predicted_actor = get_celebrity_name(matched_path)
+            predicted_actor = get_celebrity_name(
+                matched_path
+            )
 
             with col2:
                 st.subheader("✨ Closest Celebrity Match")
+
                 st.image(
                     matched_path,
                     caption=predicted_actor,
@@ -263,14 +339,15 @@ if uploaded_image is not None:
             "prediction accuracy."
         )
 
+        # -------------------- TOP 3 MATCHES --------------------
         with st.expander("See other close matches"):
             for rank, idx in enumerate(top_indices, start=1):
-                path = str(filenames[int(idx)])
 
-                if not os.path.isabs(path):
-                    path = os.path.join(BASE_DIR, path)
-
-                if not os.path.isfile(path):
+                try:
+                    path = resolve_dataset_path(
+                        filenames[int(idx)]
+                    )
+                except FileNotFoundError:
                     continue
 
                 actor = get_celebrity_name(path)
@@ -287,5 +364,7 @@ if uploaded_image is not None:
                 )
 
     except Exception as e:
-        st.error("Unable to recognize a celebrity from this photo.")
+        st.error(
+            "Unable to recognize a celebrity from this photo."
+        )
         st.warning(str(e))
